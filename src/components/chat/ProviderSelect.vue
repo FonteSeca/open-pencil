@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import AppGroupedSelect from '@/components/ui/AppGroupedSelect.vue'
-import { ACP_AGENTS, AI_PROVIDERS, AUTOMATION_HTTP_PORT, IS_TAURI } from '@open-pencil/core'
+import { ACP_AGENTS, AI_PROVIDERS, AUTOMATION_HTTP_PORT } from '@open-pencil/core'
 import { useAIChat } from '@/composables/use-chat'
 
 const { providerID, providerDef } = useAIChat()
@@ -31,13 +31,11 @@ async function checkMCPHealth(retries = 3, delayMs = 1000) {
   }
 }
 
-if (IS_TAURI) {
-  onMounted(() => {
-    void checkMCPHealth()
-  })
-}
+onMounted(() => {
+  void checkMCPHealth()
+})
 
-const acpAgents = computed(() => (IS_TAURI && mcpAvailable.value ? ACP_AGENTS : []))
+const acpAgents = computed(() => (mcpAvailable.value ? ACP_AGENTS : []))
 
 const displayName = computed(() => {
   if (providerID.value.startsWith('acp:')) {

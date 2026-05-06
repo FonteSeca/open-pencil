@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -12,6 +13,7 @@ import { z } from 'zod'
 
 import {
   ALL_TOOLS,
+  ACP_AGENTS,
   CODEGEN_PROMPT,
   buildComponent,
   createElement,
@@ -268,12 +270,16 @@ export function startServer(options: ServerOptions = {}) {
     })
   }
 
+  const acpAgents = new Map<string, ChildProcess>()
   function handleBrowserMessage(data: string, ws: WebSocket) {
     try {
       const msg = JSON.parse(data) as {
         type: string
         id?: string
         token?: string
+        agentId?: string
+        sessionId?: string
+        chunk?: string
         result?: unknown
         error?: string
         ok?: boolean
@@ -293,6 +299,61 @@ export function startServer(options: ServerOptions = {}) {
         notifyToolsChanged()
         return
       }
+
+      if (msg.type === 'acp_spawn' && msg.agentId && msg.id) {
+        const agentDef = ACP_AGENTS.find((a) => a.id === msg.agentId)
+        if (!agentDef) {
+          ws.send(JSON.stringify({ type: 'response', id: msg.id, ok: false, error: 'Unknown agent' }))
+          return
+        }
+        const sessionId = randomUUID()
+        try {
+          const child = spawn(agentDef.command, agentDef.args, {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: mcpRoot ?? process.cwd()
+          })
+          acpAgents.set(sessionId, child)
+          child.stdout?.on('data', (chunk: Buffer) => {
+            ws.send(JSON.stringify({ type: 'acp_output', sessionId, chunk: chunk.toString('utf-8') }))
+          })
+          child.stderr?.on('data', (chunk: Buffer) => {
+            ws.send(JSON.stringify({ type: 'acp_stderr', sessionId, chunk: chunk.toString('utf-8') }))
+          })
+          child.on('exit', (code) => {
+            acpAgents.delete(sessionId)
+            ws.send(JSON.stringify({ type: 'acp_exit', sessionId, code }))
+          })
+          ws.send(JSON.stringify({ type: 'response', id: msg.id, ok: true, sessionId }))
+        } catch (e) {
+          ws.send(
+            JSON.stringify({
+              type: 'response',
+              id: msg.id,
+              ok: false,
+              error: e instanceof Error ? e.message : String(e)
+            })
+          )
+        }
+        return
+      }
+
+      if (msg.type === 'acp_send' && msg.sessionId && msg.chunk) {
+        const child = acpAgents.get(msg.sessionId)
+        if (child) {
+          child.stdin?.write(msg.chunk)
+        }
+        return
+      }
+
+      if (msg.type === 'acp_kill' && msg.sessionId) {
+        const child = acpAgents.get(msg.sessionId)
+        if (child) {
+          child.kill()
+          acpAgents.delete(msg.sessionId)
+        }
+        return
+      }
+
       if (!browserRegistered || browserWs !== ws) return
       if (msg.type === 'response' && msg.id) {
         const req = pending.get(msg.id)
@@ -321,6 +382,12 @@ export function startServer(options: ServerOptions = {}) {
   const wss = new WebSocketServer({ port: wsPort, host: '127.0.0.1' })
 
   wss.on('connection', (ws) => {
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === ws.OPEN) {
+        ws.ping()
+      }
+    }, 10000)
+
     ws.on('message', (raw) => {
       handleBrowserMessage(
         typeof raw === 'string' ? raw : Buffer.from(raw as Buffer).toString('utf-8'),
@@ -329,6 +396,7 @@ export function startServer(options: ServerOptions = {}) {
     })
 
     ws.on('close', () => {
+      clearInterval(pingInterval)
       if (browserWs === ws) {
         browserWs = null
         browserToken = null
@@ -430,7 +498,11 @@ export function startServer(options: ServerOptions = {}) {
 
   function notifyToolsChanged() {
     for (const session of mcpSessions.values()) {
-      session.server.sendToolListChanged().catch(() => undefined)
+      try {
+        session.server.sendToolListChanged()
+      } catch (e) {
+        console.error('[MCP] Failed to notify tools changed:', e)
+      }
     }
   }
   const MAX_MCP_SESSIONS = 10

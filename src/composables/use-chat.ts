@@ -69,7 +69,7 @@ const providerDef = computed(
 const isACPProvider = computed(() => providerID.value.startsWith('acp:'))
 
 const isConfigured = computed(() => {
-  if (isACPProvider.value) return IS_TAURI
+  if (isACPProvider.value) return true
   if (!apiKey.value) return false
   const needsBaseURL =
     providerID.value === 'openai-compatible' || providerID.value === 'anthropic-compatible'
@@ -214,9 +214,13 @@ async function createACPTransport() {
   if (!agentDef) throw new Error(`Unknown ACP agent: ${agentId}`)
 
   const { ACPChatTransport } = await import('@/ai/acp-transport')
-  const { homeDir } = await import('@tauri-apps/api/path')
+  let cwd = '.'
+  if (IS_TAURI) {
+    const { homeDir } = await import('@tauri-apps/api/path')
+    cwd = await homeDir()
+  }
   await acpTransportInstance?.destroy()
-  const transport = new ACPChatTransport({ agentDef, cwd: await homeDir() })
+  const transport = new ACPChatTransport({ agentDef, cwd })
   acpTransportInstance = transport
   return transport
 }

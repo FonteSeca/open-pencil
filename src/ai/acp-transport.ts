@@ -4,6 +4,8 @@ import SYSTEM_PROMPT from '@/ai/system-prompt.md?raw'
 import { decodeTauriStderr } from '@/utils/tauri'
 
 import { mapUpdate } from './acp-map-update'
+import { addAutomationListener, sendAutomationMessage } from '@/automation/server'
+import { IS_TAURI } from '@open-pencil/core'
 
 import type {
   Client,
@@ -15,16 +17,18 @@ import type {
 import type { ACPAgentDef } from '@open-pencil/core'
 import type { ChatTransport, UIMessage, UIMessageChunk } from 'ai'
 
-type TauriChild = {
-  write(data: number[]): Promise<void>
+type SpawnerChild = {
+  write(data: number[] | string): Promise<void>
   kill(): Promise<void>
+  onExit?: (code: number) => void
 }
 
 interface ACPSession {
   connection: ClientSideConnection
   sessionId: string
-  child: TauriChild
+  child: SpawnerChild
   onUpdate: ((params: SessionNotification) => void) | null
+  onExit: ((code: number) => void) | null
   dead: boolean
 }
 
@@ -137,7 +141,7 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
     }
 
     if (!this.session) {
-      this.session = await this.spawnAgent()
+      this.session = IS_TAURI && !this.agentDef.mcp ? await this.spawnAgent() : await this.spawnAgentProxy()
     }
 
     const promptText = this.sentContext ? text : `${SYSTEM_PROMPT}\n\n${text}`
@@ -148,15 +152,27 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
 
     return new ReadableStream<UIMessageChunk>({
       start: (controller) => {
-        const textId = `text-${Date.now()}`
+        const baseId = Date.now().toString(36) + '-' + crypto.getRandomValues(new Uint32Array(1))[0].toString(36)
         let textStarted = false
+        let reasoningStarted = false
+        let partCounter = 0
+        let currentTextId = ''
+        let currentReasoningId = ''
+        const seenToolCalls = new Set<string>()
         let closed = false
 
         function finish(reason: 'stop' | 'other' | 'error', errorText?: string) {
           if (closed) return
           closed = true
           if (errorText) controller.enqueue({ type: 'error', errorText })
-          if (textStarted) controller.enqueue({ type: 'text-end', id: textId })
+          if (reasoningStarted) {
+            controller.enqueue({ type: 'reasoning-end', id: currentReasoningId })
+            reasoningStarted = false
+          }
+          if (textStarted) {
+            controller.enqueue({ type: 'text-end', id: currentTextId })
+            textStarted = false
+          }
           controller.enqueue({ type: 'finish-step' })
           controller.enqueue({ type: 'finish', finishReason: reason })
           session.onUpdate = null
@@ -172,11 +188,34 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
               data: params.update
             })
           }
-          const result = mapUpdate(params.update, textId, textStarted)
-          for (const chunk of result.chunks) {
-            controller.enqueue(chunk)
-          }
+          const result = mapUpdate(
+            params.update,
+            baseId,
+            textStarted,
+            reasoningStarted,
+            partCounter,
+            currentTextId,
+            currentReasoningId,
+            seenToolCalls
+          )
           textStarted = result.textStarted
+          reasoningStarted = result.reasoningStarted
+          partCounter = result.partCounter
+          currentTextId = result.currentTextId
+          currentReasoningId = result.currentReasoningId
+
+          if (closed) return
+          if (IS_DEV && result.chunks.length > 0) {
+            console.log(`[ACP] Enqueuing ${result.chunks.length} chunks for ${params.update.sessionUpdate}`)
+          }
+          for (const chunk of result.chunks) {
+            try {
+              if (!closed) controller.enqueue(chunk)
+            } catch (e) {
+              console.warn('[ACP] Failed to enqueue chunk (stream probably closed):', e)
+              break
+            }
+          }
         }
 
         abortSignal?.addEventListener('abort', () => {
@@ -184,6 +223,11 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
           finish('stop')
         })
 
+        session.onExit = (code) => {
+          finish(code === 0 ? 'stop' : 'error', code === 0 ? undefined : `Agent process exited with code ${code}`)
+        }
+
+        if (IS_DEV) console.log('[ACP] Enqueuing start / start-step')
         controller.enqueue({ type: 'start' })
         controller.enqueue({ type: 'start-step' })
 
@@ -192,10 +236,8 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
             sessionId,
             prompt: [{ type: 'text', text: promptText }]
           })
-          .then((result) => {
-            finish(result.stopReason === 'end_turn' ? 'stop' : 'other')
-          })
           .catch((e) => {
+            console.error('[ACP] Prompt failed:', e)
             finish('error', formatConnectionError(e, this.agentDef))
           })
       }
@@ -254,9 +296,16 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
       this.session = null
     })
 
-    let child: TauriChild
+    let child: SpawnerChild
     try {
-      child = await command.spawn()
+      const tauriChild = await command.spawn()
+      child = {
+        write: (data) => tauriChild.write(data as number[]),
+        kill: () => tauriChild.kill()
+      }
+      command.on('close', ({ code }) => {
+        child.onExit?.(code ?? 0)
+      })
     } catch (e) {
       throw new Error(formatConnectionError(e, this.agentDef))
     }
@@ -293,6 +342,7 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
 
     const stream = ndJsonStream(input, output)
     let onUpdate: ACPSession['onUpdate'] = null
+    let onExit: ACPSession['onExit'] = null
 
     const clientImpl: Client = {
       async requestPermission(
@@ -313,7 +363,10 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
 
     await connection.initialize({
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {}
+      clientCapabilities: {
+        // @ts-ignore
+        sessionUpdates: {}
+      }
     })
 
     let sessionResult
@@ -346,6 +399,163 @@ export class ACPChatTransport implements ChatTransport<UIMessage> {
       },
       set onUpdate(fn) {
         onUpdate = fn
+      },
+      get onExit() {
+        return onExit
+      },
+      set onExit(fn) {
+        onExit = fn
+      }
+    }
+
+    return session
+  }
+
+  private async spawnAgentProxy(): Promise<ACPSession> {
+    const agentId = this.agentDef.id
+    const id = `spawn-${crypto.randomUUID()}`
+
+    let resolve: (value: { sessionId: string }) => void
+    let reject: (reason?: any) => void
+    const promise = new Promise<{ sessionId: string }>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+
+    const removeListener = addAutomationListener((msg) => {
+      if (msg.type === 'response' && msg.id === id) {
+        if (msg.ok) resolve({ sessionId: msg.sessionId })
+        else reject(new Error(msg.error ?? 'Failed to spawn agent over MCP'))
+      }
+    })
+
+    const sent = sendAutomationMessage({ type: 'acp_spawn', agentId, id })
+    if (!sent) {
+      removeListener()
+      throw new Error('Automation server not connected')
+    }
+
+    let result
+    try {
+      result = await promise
+    } finally {
+      removeListener()
+    }
+
+    const { sessionId } = result
+    let onUpdate: ACPSession['onUpdate'] = null
+    let onExit: ACPSession['onExit'] = null
+    let dead = false
+
+    const removeOutputListener = addAutomationListener((msg) => {
+      if (msg.sessionId !== sessionId) return
+      if (msg.type === 'acp_output' && msg.chunk) {
+        outputController?.enqueue(new TextEncoder().encode(msg.chunk))
+      } else if (msg.type === 'acp_stderr' && msg.chunk) {
+        console.error(`[ACP ${agentId}]`, msg.chunk)
+      } else if (msg.type === 'acp_exit') {
+        dead = true
+        const exitHandler = onExit as ((code: number) => void) | null
+        exitHandler?.(msg.code ?? 0)
+        if (msg.code === 0 || this.destroying) outputController?.close()
+        else outputController?.error(new Error(`Agent process exited with code ${msg.code}`))
+        removeOutputListener()
+      }
+    })
+
+    let outputController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const output = new ReadableStream<Uint8Array>({
+      start(c) {
+        outputController = c
+      }
+    })
+
+    const input = new WritableStream<Uint8Array>({
+      write(chunk) {
+        sendAutomationMessage({
+          type: 'acp_send',
+          sessionId,
+          chunk: new TextDecoder().decode(chunk)
+        })
+      }
+    })
+
+    const stream = ndJsonStream(input, output)
+    const clientImpl: Client = {
+      async requestPermission(
+        params: RequestPermissionRequest
+      ): Promise<RequestPermissionResponse> {
+        // Auto-accept all requests as requested
+        const allow = params.options.find((o) => o.kind.startsWith('allow'))
+        const optionId = allow?.optionId ?? params.options[0]?.optionId
+        return { outcome: { outcome: 'selected', optionId } }
+      },
+      async sessionUpdate(params) {
+        try {
+          onUpdate?.(params)
+        } catch (e) {
+          console.error('[ACP] Error handling session update:', e, params)
+        }
+      }
+    }
+
+    const connection = new ClientSideConnection((_agent: Agent) => clientImpl, stream)
+    const { getAutomationAuthToken } = await import('@/automation/spawn-mcp')
+    const automationAuthToken = await getAutomationAuthToken()
+
+    await connection.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        // @ts-ignore
+        sessionUpdates: {}
+      }
+    })
+
+    let sessionResult
+    try {
+      sessionResult = await connection.newSession({
+        cwd: this.cwd,
+        mcpServers: [
+          {
+            type: 'http' as const,
+            name: 'open-pencil',
+            url: 'http://127.0.0.1:7600/mcp',
+            headers: automationAuthToken
+              ? [{ name: 'Authorization', value: `Bearer ${automationAuthToken}` }]
+              : []
+          }
+        ]
+      })
+    } catch (e) {
+      sendAutomationMessage({ type: 'acp_kill', sessionId })
+      throw new Error(formatConnectionError(e, this.agentDef))
+    }
+
+    const session: ACPSession = {
+      connection,
+      sessionId: sessionResult.sessionId,
+      child: {
+        write: async (data) => {
+          const chunk =
+            typeof data === 'string' ? data : new TextDecoder().decode(new Uint8Array(data))
+          sendAutomationMessage({ type: 'acp_send', sessionId, chunk })
+        },
+        kill: async () => {
+          sendAutomationMessage({ type: 'acp_kill', sessionId })
+        }
+      },
+      dead,
+      get onUpdate() {
+        return onUpdate
+      },
+      set onUpdate(fn) {
+        onUpdate = fn
+      },
+      get onExit() {
+        return onExit
+      },
+      set onExit(fn) {
+        onExit = fn
       }
     }
 

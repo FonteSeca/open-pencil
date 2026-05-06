@@ -61,7 +61,13 @@ function scrollToBottom() {
   })
 }
 
-watch(messages, scrollToBottom, { deep: true })
+watch(messages, (newMessages) => {
+  if (IS_DEV && newMessages.length > 0) {
+    const last = newMessages[newMessages.length - 1]
+    console.log('[Chat] Messages updated. Last message parts:', last.parts.length, last.parts.map(p => ({ type: p.type, keys: Object.keys(p) })))
+  }
+  scrollToBottom()
+}, { deep: true })
 watch(
   () => activeTab.value?.id,
   async () => {

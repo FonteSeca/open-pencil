@@ -121,6 +121,7 @@ export interface ACPAgentDef {
   command: string
   args: string[]
   installCommand?: string
+  mcp?: boolean
 }
 
 export const ACP_AGENTS: ACPAgentDef[] = [
@@ -142,7 +143,7 @@ export const ACP_AGENTS: ACPAgentDef[] = [
     id: 'gemini-cli',
     name: 'Gemini CLI',
     command: 'gemini',
-    args: ['--acp'],
+    args: ['--experimental-acp'],
     installCommand: 'npm i -g @google/gemini-cli'
   }
 ]

@@ -25,6 +25,7 @@
     "provenance": true
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
     "@hono/node-server": "^1.19.9",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@open-pencil/core": "workspace:*",

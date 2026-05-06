@@ -4,52 +4,103 @@ import type { UIMessageChunk } from 'ai'
 export interface MapResult {
   chunks: UIMessageChunk[]
   textStarted: boolean
+  reasoningStarted: boolean
+  partCounter: number
+  currentTextId: string
+  currentReasoningId: string
+  seenToolCalls: Set<string>
 }
 
-export function mapUpdate(update: SessionUpdate, textId: string, textStarted: boolean): MapResult {
+export function mapUpdate(
+  update: SessionUpdate,
+  baseId: string,
+  textStarted: boolean,
+  reasoningStarted: boolean,
+  partCounter: number,
+  currentTextId: string,
+  currentReasoningId: string,
+  seenToolCalls: Set<string>
+): MapResult {
   const chunks: UIMessageChunk[] = []
+
+  if (!update || !update.sessionUpdate) {
+    return { chunks, textStarted, reasoningStarted, partCounter, currentTextId, currentReasoningId, seenToolCalls }
+  }
 
   switch (update.sessionUpdate) {
     case 'agent_message_chunk': {
-      if (update.content.type === 'text' && update.content.text) {
+      const content = update.content as any
+      const text = typeof content?.text === 'string' 
+        ? content.text 
+        : (Array.isArray(content) ? textFromContent(content) : undefined)
+
+      if (text) {
+        if (reasoningStarted) {
+          chunks.push({ type: 'reasoning-end', id: currentReasoningId })
+          reasoningStarted = false
+        }
         if (!textStarted) {
-          chunks.push({ type: 'text-start', id: textId })
+          partCounter++
+          currentTextId = `text-${baseId}-${partCounter}`
+          chunks.push({ type: 'text-start', id: currentTextId })
           textStarted = true
         }
         chunks.push({
           type: 'text-delta',
-          id: textId,
-          delta: update.content.text
+          id: currentTextId,
+          delta: text
         })
-      } else if (update.content.type !== 'text') {
-        console.warn('[ACP] Unhandled content type:', update.content.type)
       }
       break
     }
     case 'agent_thought_chunk': {
-      if (update.content.type === 'text') {
-        const rid = `reasoning-${textId}`
-        chunks.push({ type: 'reasoning-start', id: rid })
+      const content = update.content as any
+      const text = typeof content?.text === 'string' 
+        ? content.text 
+        : (Array.isArray(content) ? textFromContent(content) : undefined)
+
+      if (text) {
+        if (textStarted) {
+          chunks.push({ type: 'text-end', id: currentTextId })
+          textStarted = false
+        }
+        if (!reasoningStarted) {
+          partCounter++
+          currentReasoningId = `reasoning-${baseId}-${partCounter}`
+          chunks.push({ type: 'reasoning-start', id: currentReasoningId })
+          reasoningStarted = true
+        }
         chunks.push({
           type: 'reasoning-delta',
-          id: rid,
-          delta: update.content.text
+          id: currentReasoningId,
+          delta: text
         })
-        chunks.push({ type: 'reasoning-end', id: rid })
       }
       break
     }
     case 'tool_call': {
-      if (!update.title) {
-        console.warn('[ACP] Tool call without title:', update.toolCallId)
+      if (!update.toolCallId) break
+
+      seenToolCalls.add(update.toolCallId)
+
+      if (reasoningStarted) {
+        chunks.push({ type: 'reasoning-end', id: currentReasoningId })
+        reasoningStarted = false
       }
-      const toolName = update.title || 'unknown'
+      if (textStarted) {
+        chunks.push({ type: 'text-end', id: currentTextId })
+        textStarted = false
+      }
+
+      const inferredName = update.toolCallId.split('-')[0]
+      const toolName = update.title && update.title.length < 50 ? update.title : inferredName
+
       chunks.push({
         type: 'tool-input-start',
         toolCallId: update.toolCallId,
         toolName,
         providerExecuted: true,
-        title: update.title
+        title: update.title && update.title.length < 50 ? update.title : undefined
       })
       if (update.rawInput) {
         chunks.push({
@@ -58,19 +109,47 @@ export function mapUpdate(update: SessionUpdate, textId: string, textStarted: bo
           toolName,
           input: update.rawInput,
           providerExecuted: true,
-          title: update.title
+          title: update.title && update.title.length < 50 ? update.title : undefined
         })
       }
       break
     }
     case 'tool_call_update': {
-      if (update.status === 'completed') {
+      if (!update.toolCallId) break
+
+      if (!seenToolCalls.has(update.toolCallId)) {
+        seenToolCalls.add(update.toolCallId)
+        if (reasoningStarted) {
+          chunks.push({ type: 'reasoning-end', id: currentReasoningId })
+          reasoningStarted = false
+        }
+        if (textStarted) {
+          chunks.push({ type: 'text-end', id: currentTextId })
+          textStarted = false
+        }
+
+        const inferredName = update.toolCallId.split('-')[0]
+        const toolName = update.title && update.title.length < 50 ? update.title : inferredName
+
         chunks.push({
-          type: 'tool-output-available',
+          type: 'tool-input-start',
           toolCallId: update.toolCallId,
-          output: update.rawOutput ?? textFromContent(update.content ?? undefined),
-          providerExecuted: true
+          toolName,
+          providerExecuted: true,
+          title: update.title && update.title.length < 50 ? update.title : undefined
         })
+      }
+
+      if (update.status === 'completed') {
+        const output = update.rawOutput ?? textFromContent(update.content ?? undefined)
+        if (output !== undefined) {
+          chunks.push({
+            type: 'tool-output-available',
+            toolCallId: update.toolCallId,
+            output,
+            providerExecuted: true
+          })
+        }
       } else if (update.status === 'failed') {
         chunks.push({
           type: 'tool-output-error',
@@ -83,7 +162,7 @@ export function mapUpdate(update: SessionUpdate, textId: string, textStarted: bo
     }
   }
 
-  return { chunks, textStarted }
+  return { chunks, textStarted, reasoningStarted, partCounter, currentTextId, currentReasoningId, seenToolCalls }
 }
 
 export function textFromContent(

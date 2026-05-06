@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { isTextUIPart, isToolUIPart, getToolName } from 'ai'
+import { isTextUIPart, isToolUIPart, isReasoningUIPart, getToolName } from 'ai'
 import { CollapsibleContent, CollapsibleRoot, CollapsibleTrigger } from 'reka-ui'
 import { Markdown } from 'vue-stream-markdown'
 import 'vue-stream-markdown/index.css'
@@ -46,8 +46,30 @@ function partKey(part: UIMessagePart<UIDataTypes, UITools>, index: number): stri
     <div class="min-w-0 space-y-1.5" :class="message.role === 'user' ? 'max-w-[85%]' : ''">
       <template v-if="message.role === 'assistant'">
         <template v-for="(part, i) in message.parts" :key="partKey(part, i)">
+          <!-- Reasoning / Thoughts -->
+          <div v-if="isReasoningUIPart(part)" class="mb-2">
+            <CollapsibleRoot>
+              <CollapsibleTrigger
+                class="flex w-full items-center gap-2 rounded px-1 py-0.5 hover:bg-hover text-muted"
+              >
+                <icon-lucide-brain class="size-3" />
+                <span class="text-[10px] font-medium uppercase tracking-wider">Thought Process</span>
+                <icon-lucide-chevron-down
+                  class="ml-auto size-3 text-muted transition-transform [[data-state=open]>&]:rotate-180"
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent
+                class="data-[state=closed]:collapsible-up data-[state=open]:collapsible-down overflow-hidden text-[11px]"
+              >
+                <div class="mt-1 border-l-2 border-border pl-2 italic text-muted/80">
+                  <Markdown :content="part.text" :mermaid="false" class="chat-markdown" />
+                </div>
+              </CollapsibleContent>
+            </CollapsibleRoot>
+          </div>
+
           <!-- Tool call -->
-          <div v-if="isToolUIPart(part)" class="rounded-lg border border-border bg-canvas p-2">
+          <div v-else-if="isToolUIPart(part)" class="rounded-lg border border-border bg-canvas p-2">
             <CollapsibleRoot>
               <CollapsibleTrigger
                 class="flex w-full items-center gap-2 rounded px-1 py-0.5 hover:bg-hover"

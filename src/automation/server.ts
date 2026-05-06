@@ -1,3 +1,4 @@
+import { getToolLogEntries } from '@/ai/tools'
 import { makeFigmaFromStore } from '@/automation/figma-factory'
 import { openFileFromPath } from '@/composables/use-menu'
 import { createTab, openFileInNewTab } from '@/stores/tabs'
@@ -22,6 +23,24 @@ import {
 
 import type { EditorStore } from '@/stores/editor'
 import type { RasterExportFormat } from '@open-pencil/core'
+
+export type AutomationMessageListener = (msg: any) => void
+const listeners = new Set<AutomationMessageListener>()
+
+export function addAutomationListener(fn: AutomationMessageListener) {
+  listeners.add(fn)
+  return () => listeners.delete(fn)
+}
+
+let activeWs: WebSocket | null = null
+
+export function sendAutomationMessage(msg: any) {
+  if (activeWs?.readyState === WebSocket.OPEN) {
+    activeWs.send(JSON.stringify(msg))
+    return true
+  }
+  return false
+}
 
 export function connectAutomation(getStore: () => EditorStore, authToken: string | null = null) {
   const token = authToken ?? randomHex(32)
@@ -52,6 +71,7 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
     store: EditorStore,
     toolArgs: Record<string, unknown>
   ): Promise<unknown> {
+    const start = Date.now()
     const tree = toolArgs.tree as Parameters<typeof renderTreeNode>[1]
     const result = await renderTreeNode(store.graph, tree, {
       parentId: (toolArgs.parent_id as string | undefined) ?? store.state.currentPageId,
@@ -61,6 +81,16 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
     computeAllLayouts(store.graph, store.state.currentPageId)
     store.requestRender()
     store.flashNodes([result.id])
+
+    getToolLogEntries(store).push({
+      tool: 'render',
+      args: toolArgs,
+      result: { id: result.id, name: result.name, type: result.type, children: result.childIds },
+      timestamp: start,
+      durationMs: Date.now() - start,
+      mutates: true
+    })
+
     return {
       ok: true,
       result: { id: result.id, name: result.name, type: result.type, children: result.childIds }
@@ -78,6 +108,8 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
 
     const def = ALL_TOOLS.find((t) => t.name === toolName)
     if (!def) throw new Error(`Unknown tool: ${toolName}`)
+
+    const start = Date.now()
     const figma = makeFigma()
     const result = await def.execute(figma, toolArgs)
 
@@ -88,8 +120,19 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
     if (def.mutates) {
       computeAllLayouts(store.graph, store.state.currentPageId)
       store.requestRender()
+      // @ts-ignore - extractNodeIds is defined in this file's scope usually, but let's be safe
       store.flashNodes(extractNodeIds(result))
     }
+
+    getToolLogEntries(store).push({
+      tool: toolName,
+      args: toolArgs,
+      result,
+      timestamp: start,
+      durationMs: Date.now() - start,
+      mutates: def.mutates
+    })
+
     return { ok: true, result }
   }
 
@@ -212,8 +255,11 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
 
     ws.onopen = () => {
       console.debug('[Automation] WebSocket connected to MCP server')
+      activeWs = ws
       ws?.send(JSON.stringify({ type: 'register', token }))
     }
+
+    let requestQueue = Promise.resolve()
 
     ws.onmessage = async (event) => {
       try {
@@ -223,20 +269,29 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
           command: string
           args?: unknown
         }
-        if (msg.type !== 'request' || !msg.id) return
-        try {
-          const result = await handleRequest(msg.id, msg.command, msg.args)
-          ws?.send(JSON.stringify({ type: 'response', id: msg.id, ...(result as object) }))
-        } catch (e) {
-          ws?.send(
-            JSON.stringify({
-              type: 'response',
-              id: msg.id,
-              ok: false,
-              error: e instanceof Error ? e.message : String(e)
-            })
-          )
+
+        for (const listener of listeners) {
+          listener(msg)
         }
+
+        if (msg.type !== 'request' || !msg.id) return
+
+        // Serialize requests to ensure sequential execution and consistent state
+        requestQueue = requestQueue.then(async () => {
+          try {
+            const result = await handleRequest(msg.id, msg.command, msg.args)
+            ws?.send(JSON.stringify({ type: 'response', id: msg.id, ...(result as object) }))
+          } catch (e) {
+            ws?.send(
+              JSON.stringify({
+                type: 'response',
+                id: msg.id,
+                ok: false,
+                error: e instanceof Error ? e.message : String(e)
+              })
+            )
+          }
+        })
       } catch (e) {
         console.warn('Failed to parse WebSocket message:', e)
       }
@@ -245,12 +300,14 @@ export function connectAutomation(getStore: () => EditorStore, authToken: string
     ws.onclose = (event) => {
       console.error('[Automation] WebSocket closed:', `code=${event.code} reason=${event.reason}`)
       ws = null
+      if (activeWs === ws) activeWs = null
       scheduleReconnect()
     }
 
     ws.onerror = (event) => {
       console.error('[Automation] WebSocket error:', event)
       ws?.close()
+      if (activeWs === ws) activeWs = null
     }
   }
 
