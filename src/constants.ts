@@ -81,7 +81,15 @@ export const YJS_JSON_FIELDS = new Set([
   'effects',
   'vectorNetwork',
   'boundVariables',
-  'styleRuns'
+  'styleRuns',
+  'pluginData',
+  'sharedPluginData',
+  'pluginRelaunchData',
+  'overrides',
+  'dashPattern',
+  'arcData',
+  'fillGeometry',
+  'strokeGeometry'
 ])
 
 export {

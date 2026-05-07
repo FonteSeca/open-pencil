@@ -1,5 +1,5 @@
 import { useDebounceFn } from '@vueuse/core'
-import { shallowReactive, shallowRef, computed, watch, triggerRef } from 'vue'
+import { shallowReactive, shallowRef, computed, watch, triggerRef, toRaw, markRaw } from 'vue'
 
 import { IS_TAURI } from '@/constants'
 import { loadFont } from '@/engine/fonts'
@@ -47,7 +47,7 @@ export type { EditorToolDef as ToolDef } from '@open-pencil/core'
 export { EDITOR_TOOLS as TOOLS, TOOL_SHORTCUTS } from '@open-pencil/core'
 
 export function createEditorStore(initialGraph?: SceneGraph) {
-  const graph = initialGraph ?? new SceneGraph()
+  const graph = markRaw(initialGraph ?? new SceneGraph())
 
   const state = shallowReactive<
     Omit<EditorState, 'penState'> & {
@@ -73,6 +73,7 @@ export function createEditorStore(initialGraph?: SceneGraph) {
       autosaveEnabled: boolean
       cursorCanvasX: number | null
       cursorCanvasY: number | null
+      cloudId: string | null
       nodeEditState: {
         nodeId: string
         origNetwork: VectorNetwork
@@ -108,6 +109,7 @@ export function createEditorStore(initialGraph?: SceneGraph) {
     autosaveEnabled: false,
     cursorCanvasX: null,
     cursorCanvasY: null,
+    cloudId: null,
     nodeEditState: null,
     scrubInputFocused: false
   })
@@ -161,24 +163,43 @@ export function createEditorStore(initialGraph?: SceneGraph) {
     }, 100)
   }
 
-  const AUTOSAVE_DELAY = 3000
+  const AUTOSAVE_DELAY = 5000 // 5 segundos de inatividade
+  let isSaving = false
 
   const debouncedAutosave = useDebounceFn(async () => {
     if (state.sceneVersion === savedVersion) return
     if (!state.autosaveEnabled) return
+    if (isSaving) return
+
     try {
-      await writeFile(await buildFigFile())
+      isSaving = true
+      console.log('Autosave triggered...', { cloudId: state.cloudId, local: !!fileHandle })
+      
+      const currentVersion = state.sceneVersion
+      const data = await buildFigFile()
+      
+      if (state.cloudId) {
+        console.log('Dispatching cloud autosave event for:', state.cloudId)
+        window.dispatchEvent(new CustomEvent('editor:cloud-autosave', { detail: { id: state.cloudId, data } }))
+      } else {
+        await writeFile(data)
+      }
+      
+      savedVersion = currentVersion
     } catch (e) {
       console.warn('Autosave failed:', e)
+    } finally {
+      isSaving = false
     }
   }, AUTOSAVE_DELAY)
+
 
   watch(
     () => state.sceneVersion,
     (version) => {
       if (version === savedVersion) return
       if (!state.autosaveEnabled) return
-      if (!fileHandle && !filePath) return
+      if (!fileHandle && !filePath && !state.cloudId) return
       void debouncedAutosave()
     }
   )
@@ -910,7 +931,7 @@ export function createEditorStore(initialGraph?: SceneGraph) {
   }
 
   function buildFigFile() {
-    return exportFigFile(editor.graph, undefined, editor.renderer ?? undefined, state.currentPageId)
+    return exportFigFile(toRaw(editor.graph), undefined, editor.renderer ?? undefined, state.currentPageId)
   }
 
   async function saveFigFile() {
@@ -1267,6 +1288,8 @@ export function createEditorStore(initialGraph?: SceneGraph) {
     openFigFile,
     saveFigFile,
     saveFigFileAs,
+    buildFigFile,
+
     setDocumentSource,
     setPlannedFilePath,
     startWatchingCurrentFile,

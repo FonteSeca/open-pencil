@@ -273,22 +273,41 @@ function compressViaWorker(
       worker.terminate()
     }
 
+    const schemaCopy = new Uint8Array(schemaDeflated)
+    const kiwiCopy = new Uint8Array(kiwiData)
+    const thumbCopy = new Uint8Array(thumbnailPng)
+
     const imgCopies = imageEntries.map((e) => ({
       name: e.name,
       data: new Uint8Array(e.data)
     }))
 
     const transferables = [
-      schemaDeflated.buffer,
-      kiwiData.buffer,
-      thumbnailPng.buffer,
+      schemaCopy.buffer,
+      kiwiCopy.buffer,
+      thumbCopy.buffer,
       ...imgCopies.map((e) => e.data.buffer)
     ]
 
+    console.log('📦 Preparing worker message:', {
+      schemaDeflated: { type: schemaCopy?.constructor?.name, isProxy: false },
+      kiwiData: { type: kiwiCopy?.constructor?.name, isProxy: false },
+      thumbnailPng: { type: thumbCopy?.constructor?.name, isProxy: false },
+      imagesCount: imgCopies.length,
+      imagesHaveProxy: false
+    })
+
     worker.postMessage(
-      { schemaDeflated, kiwiData, thumbnailPng, metaJson, images: imgCopies },
+      { 
+        schemaDeflated: schemaCopy, 
+        kiwiData: kiwiCopy, 
+        thumbnailPng: thumbCopy, 
+        metaJson, 
+        images: imgCopies 
+      },
       transferables
     )
+
   })
 }
 

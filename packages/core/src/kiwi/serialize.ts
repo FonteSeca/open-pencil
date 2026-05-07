@@ -18,7 +18,7 @@ const TEXT_DIRECTION_PLUGIN_KEY = 'textDirection'
 const LAYOUT_DIRECTION_PLUGIN_KEY = 'layoutDirection'
 
 function upsertPluginData(node: SceneNode, key: string, value: string): void {
-  const pluginData = node.pluginData.filter(
+  const pluginData = (node.pluginData || []).filter(
     (entry) => !(entry.pluginId === OPEN_PENCIL_PLUGIN_ID && entry.key === key)
   )
   pluginData.push({ pluginId: OPEN_PENCIL_PLUGIN_ID, key, value })

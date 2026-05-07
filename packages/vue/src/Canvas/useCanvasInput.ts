@@ -89,7 +89,7 @@ export function useCanvasInput(
   const MULTI_CLICK_DELAY = 500
   const MULTI_CLICK_RADIUS = 5
 
-  function getCoords(e: MouseEvent) {
+  function getCoords(e: PointerEvent | MouseEvent) {
     const canvas = canvasRef.value
     if (!canvas) return { sx: 0, sy: 0, cx: 0, cy: 0 }
     const rect = canvas.getBoundingClientRect()
@@ -158,7 +158,7 @@ export function useCanvasInput(
     drag.value = d
   }
 
-  function startPanDrag(e: MouseEvent) {
+  function startPanDrag(e: PointerEvent) {
     drag.value = {
       type: 'pan',
       startScreenX: e.clientX,
@@ -222,7 +222,7 @@ export function useCanvasInput(
     return true
   }
 
-  function handlePanMove(d: DragPan, e: MouseEvent) {
+  function handlePanMove(d: DragPan, e: PointerEvent) {
     const dx = e.clientX - d.startScreenX
     const dy = e.clientY - d.startScreenY
     editor.state.panX = d.startPanX + dx
@@ -349,7 +349,7 @@ export function useCanvasInput(
     return best
   }
 
-  function onMouseDown(e: MouseEvent) {
+  function onMouseDown(e: PointerEvent) {
     if (!editor.state.editingTextId) canvasRef.value?.focus()
     editor.setHoveredNode(null)
     const { sx, sy, cx, cy } = getCoords(e)
@@ -455,7 +455,7 @@ export function useCanvasInput(
     drag.value = { type: 'draw', startX: cx, startY: cy, nodeId }
   }
 
-  function onMouseMove(e: MouseEvent) {
+  function onMouseMove(e: PointerEvent) {
     const nodeEditEditor = editor as Editor & NodeEditMethods
     if (onCursorMove) {
       const { cx, cy } = getCoords(e)
@@ -737,7 +737,7 @@ export function useCanvasInput(
     cursorOverride.value = null
   }
 
-  function onDblClick(e: MouseEvent) {
+  function onDblClick(e: PointerEvent | MouseEvent) {
     const nodeEditEditor = editor as Editor & NodeEditMethods
     if (editor.state.editingTextId) return
 
@@ -786,15 +786,15 @@ export function useCanvasInput(
   }
 
   useEventListener(canvasRef, 'dblclick', onDblClick)
-  useEventListener(canvasRef, 'mousedown', onMouseDown)
-  useEventListener(canvasRef, 'mousemove', onMouseMove)
-  useEventListener(canvasRef, 'mouseup', onMouseUp)
-  useEventListener(canvasRef, 'mouseleave', () => {
+  useEventListener(canvasRef, 'pointerdown', onMouseDown)
+  useEventListener(canvasRef, 'pointermove', onMouseMove)
+  useEventListener(canvasRef, 'pointerup', onMouseUp)
+  useEventListener(canvasRef, 'pointerleave', () => {
     if (!drag.value) {
       editor.setHoveredNode(null)
     }
   })
-  useEventListener(window, 'mouseup', () => {
+  useEventListener(window, 'pointerup', () => {
     if (drag.value) onMouseUp()
   })
 

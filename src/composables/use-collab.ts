@@ -4,6 +4,8 @@ import { ref, watch, onUnmounted, computed, type InjectionKey, inject } from 'vu
 import { IndexeddbPersistence } from 'y-indexeddb'
 import * as awarenessProtocol from 'y-protocols/awareness'
 import * as Y from 'yjs'
+import SupabaseProvider from 'y-supabase/dist/index.js'
+import { supabase } from '@/services/supabase'
 
 import {
   TRYSTERO_APP_ID,
@@ -60,6 +62,7 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
   let yimages: Y.Map<Uint8Array> | null = null
   let room: Room | null = null
   let persistence: IndexeddbPersistence | null = null
+  let supabaseProvider: SupabaseProvider | null = null
   let connectedStore: EditorStore | null = null
   let suppressGraphSync = false
   let suppressYjsEvents = false
@@ -83,6 +86,32 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
     yimages = ydoc.getMap('images')
 
     persistence = new IndexeddbPersistence(`op-room-${roomId}`, ydoc)
+
+    // Sincronização persistente com Supabase se disponível e habilitada
+    const enableRealtime = import.meta.env.VITE_ENABLE_REALTIME !== 'false'
+    
+    if (enableRealtime) {
+      console.log('🔗 Connecting to Supabase Realtime sync:', roomId)
+      
+      // Fix para interop de CommonJS/ESM
+      const SupabaseProviderConstructor = (SupabaseProvider as any).default || SupabaseProvider
+      
+      // Garantir que o canal esteja configurado para broadcast sem fallback
+      supabaseProvider = new SupabaseProviderConstructor(ydoc, supabase, {
+        channel: `room:${roomId}`,
+        id: roomId,
+        tableName: 'yjs_updates',
+        columnName: 'update', // Padrão do y-supabase
+        idName: 'room_name',  // Padrão do y-supabase
+        resyncInterval: 1000 * 60
+      })
+ 
+      supabaseProvider?.on('status', (status: any) => {
+        console.log('📡 Supabase sync status:', status)
+      })
+    } else {
+      console.log('📡 Realtime sync disabled by VITE_ENABLE_REALTIME flag')
+    }
 
     awareness.on('change', () => {
       updatePeersList()
@@ -113,98 +142,97 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
       store.requestRender()
     })
 
-    room = joinTrysteroRoom(
-      {
-        appId: TRYSTERO_APP_ID,
-        rtcConfig: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun.cloudflare.com:3478' },
-            {
-              urls: 'turn:openrelay.metered.ca:443',
-              username: 'openrelayproject',
-              credential: 'openrelayproject'
-            },
-            {
-              urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-              username: 'openrelayproject',
-              credential: 'openrelayproject'
-            }
-          ]
+    // Trystero (P2P) desativado se estivermos usando Supabase ou se o realtime estiver desligado
+    if (!roomId && enableRealtime) {
+      room = joinTrysteroRoom(
+        {
+          appId: TRYSTERO_APP_ID,
+          rtcConfig: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun.cloudflare.com:3478' }
+            ]
+          }
+        },
+        roomId || 'default'
+      )
+ 
+      const [sendUpdate, getUpdate] = room.makeAction<Uint8Array>('yjs-update')
+      const [sendAw, getAw] = room.makeAction<Uint8Array>('awareness')
+      const [sendSync, getSync] = room.makeAction<Uint8Array>('sync-step1')
+      const [sendSyncReply, getSyncReply] = room.makeAction<Uint8Array>('sync-reply')
+ 
+      sendYjsUpdate = (data, peerId) => void (peerId ? sendUpdate(data, peerId) : sendUpdate(data))
+      sendAwareness = (data, peerId) => void (peerId ? sendAw(data, peerId) : sendAw(data))
+      sendSyncStep1 = (data, peerId) => void (peerId ? sendSync(data, peerId) : sendSync(data))
+ 
+      getUpdate((data) => {
+        if (!ydoc) return
+        Y.applyUpdate(ydoc, new Uint8Array(data), 'remote')
+      })
+ 
+      getAw((data) => {
+        if (!awareness) return
+        awarenessProtocol.applyAwarenessUpdate(awareness, new Uint8Array(data), null)
+      })
+ 
+      getSync((data, peerId) => {
+        if (!ydoc) return
+        const sv = new Uint8Array(data)
+        const update = Y.encodeStateAsUpdate(ydoc, sv)
+        void sendSyncReply(update, peerId)
+      })
+ 
+      getSyncReply((data) => {
+        if (!ydoc) return
+        Y.applyUpdate(ydoc, new Uint8Array(data), 'remote')
+      })
+ 
+      room.onPeerJoin((peerId) => {
+        state.value.connected = true
+        if (ydoc) {
+          const sv = Y.encodeStateVector(ydoc)
+          sendSyncStep1?.(sv, peerId)
         }
-      },
-      roomId
-    )
-
-    const [sendUpdate, getUpdate] = room.makeAction<Uint8Array>('yjs-update')
-    const [sendAw, getAw] = room.makeAction<Uint8Array>('awareness')
-    const [sendSync, getSync] = room.makeAction<Uint8Array>('sync-step1')
-    const [sendSyncReply, getSyncReply] = room.makeAction<Uint8Array>('sync-reply')
-
-    sendYjsUpdate = (data, peerId) => void (peerId ? sendUpdate(data, peerId) : sendUpdate(data))
-    sendAwareness = (data, peerId) => void (peerId ? sendAw(data, peerId) : sendAw(data))
-    sendSyncStep1 = (data, peerId) => void (peerId ? sendSync(data, peerId) : sendSync(data))
-
-    getUpdate((data) => {
-      if (!ydoc) return
-      Y.applyUpdate(ydoc, new Uint8Array(data), 'remote')
-    })
-
-    getAw((data) => {
-      if (!awareness) return
-      awarenessProtocol.applyAwarenessUpdate(awareness, new Uint8Array(data), null)
-    })
-
-    getSync((data, peerId) => {
-      if (!ydoc) return
-      const sv = new Uint8Array(data)
-      const update = Y.encodeStateAsUpdate(ydoc, sv)
-      void sendSyncReply(update, peerId)
-    })
-
-    getSyncReply((data) => {
-      if (!ydoc) return
-      Y.applyUpdate(ydoc, new Uint8Array(data), 'remote')
-    })
+ 
+        if (awareness) {
+          const encodedUpdate = awarenessProtocol.encodeAwarenessUpdate(awareness, [
+            awareness.clientID
+          ])
+          sendAwareness?.(encodedUpdate, peerId)
+        }
+      })
+ 
+      room.onPeerLeave(() => {
+        if (awareness) {
+          const remoteClients = [...awareness.getStates().keys()].filter(
+            (id) => id !== awareness.clientID
+          )
+          awarenessProtocol.removeAwarenessStates(awareness, remoteClients, 'peer-left')
+          updatePeersList()
+        }
+      })
+    }
 
     ydoc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin === 'remote') return
       sendYjsUpdate?.(update)
     })
 
-    const localAwareness = awareness
-    const localYdoc = ydoc
-
-    localAwareness.on(
-      'update',
-      ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-        const changedClients = [...added, ...updated, ...removed]
-        const encodedUpdate = awarenessProtocol.encodeAwarenessUpdate(
-          localAwareness,
-          changedClients
-        )
-        sendAwareness?.(encodedUpdate)
-      }
-    )
-
-    room.onPeerJoin((peerId) => {
-      state.value.connected = true
-      const sv = Y.encodeStateVector(localYdoc)
-      sendSyncStep1?.(sv, peerId)
-
-      const encodedUpdate = awarenessProtocol.encodeAwarenessUpdate(localAwareness, [
-        localAwareness.clientID
-      ])
-      sendAwareness?.(encodedUpdate, peerId)
-    })
-
-    room.onPeerLeave(() => {
-      const remoteClients = [...localAwareness.getStates().keys()].filter(
-        (id) => id !== localAwareness.clientID
+    if (awareness) {
+      const localAwareness = awareness
+      localAwareness.on(
+        'update',
+        ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
+          const changedClients = [...added, ...updated, ...removed]
+          const encodedUpdate = awarenessProtocol.encodeAwarenessUpdate(
+            localAwareness,
+            changedClients
+          )
+          sendAwareness?.(encodedUpdate)
+        }
       )
-      awarenessProtocol.removeAwarenessStates(localAwareness, remoteClients, 'peer-left')
-      updatePeersList()
-    })
+    }
 
     state.value.connected = true
     broadcastAwareness()
@@ -222,13 +250,13 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
       }
     )
 
-    function onGraphMutation(nodeId: string) {
+    function onGraphMutation(nodeId: string, changes?: Partial<SceneNode>) {
       if (!suppressGraphSync && ydoc && ynodes) {
-        syncNodeToYjs(nodeId)
+        syncNodeToYjs(nodeId, changes)
       }
     }
-
-    const unbindUpdated = store.graph.emitter.on('node:updated', (id) => onGraphMutation(id))
+ 
+    const unbindUpdated = store.graph.emitter.on('node:updated', (id, changes) => onGraphMutation(id, changes))
     const unbindCreated = store.graph.emitter.on('node:created', (node) => onGraphMutation(node.id))
     const unbindReparented = store.graph.emitter.on('node:reparented', (nodeId) =>
       onGraphMutation(nodeId)
@@ -276,6 +304,10 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
       void persistence.destroy()
       persistence = null
     }
+    if (supabaseProvider) {
+      supabaseProvider.destroy()
+      supabaseProvider = null
+    }
     if (ydoc) {
       ydoc.destroy()
       ydoc = null
@@ -291,12 +323,12 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
     connectedStore = null
   }
 
-  function syncNodeToYjs(nodeId: string) {
+  function syncNodeToYjs(nodeId: string, changes?: Partial<SceneNode>) {
     const store = connectedStore ?? getStore()
     if (!ydoc || !ynodes) return
     const node = store.graph.getNode(nodeId)
     if (!node) return
-
+ 
     const localYnodes = ynodes
     const localYimages = yimages
     suppressYjsEvents = true
@@ -306,9 +338,12 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
         ynode = new Y.Map()
         localYnodes.set(nodeId, ynode)
       }
-      syncNodePropsToYMap(node, ynode)
-
-      if (localYimages) {
+      
+      // Sincroniza apenas o que mudou (ou tudo se for um nó novo)
+      const propsToSync = changes ?? node
+      syncNodePropsToYMap(propsToSync, ynode)
+ 
+      if (localYimages && (changes?.fills || !changes)) {
         for (const fill of node.fills) {
           if (fill.imageHash && !localYimages.has(fill.imageHash)) {
             const data = store.graph.images.get(fill.imageHash)
@@ -319,13 +354,20 @@ export function useCollab(storeOrGetter: EditorStore | (() => EditorStore)) {
     })
     suppressYjsEvents = false
   }
-
-  function syncNodePropsToYMap(node: SceneNode, ynode: Y.Map<unknown>) {
-    for (const [key, value] of Object.entries(node)) {
+ 
+  function syncNodePropsToYMap(props: Partial<SceneNode>, ynode: Y.Map<unknown>) {
+    for (const [key, value] of Object.entries(props)) {
+      if (value === undefined) continue
       if (typeof value === 'object' && value !== null) {
-        ynode.set(key, JSON.stringify(value))
+        const serialized = JSON.stringify(value)
+        // Só atualiza se o valor serializado for diferente para evitar loops e tráfego desnecessário
+        if (ynode.get(key) !== serialized) {
+          ynode.set(key, serialized)
+        }
       } else {
-        ynode.set(key, value)
+        if (ynode.get(key) !== value) {
+          ynode.set(key, value)
+        }
       }
     }
   }

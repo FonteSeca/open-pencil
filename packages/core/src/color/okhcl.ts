@@ -153,7 +153,7 @@ export function setNodeFillOkHCL(
   }
 
   const payloads = filterOkHCLPayloads(
-    node.pluginData.map((entry) => entry.value),
+    (node.pluginData || []).map((entry) => entry.value),
     'fill',
     index
   )
@@ -181,7 +181,7 @@ export function setNodeStrokeOkHCL(
   }
 
   const payloads = filterOkHCLPayloads(
-    node.pluginData.map((entry) => entry.value),
+    (node.pluginData || []).map((entry) => entry.value),
     'stroke',
     index
   )
@@ -195,7 +195,7 @@ export function setNodeStrokeOkHCL(
 
 export function clearNodeFillOkHCL(node: SceneNode, index: number): Partial<SceneNode> {
   const okhclValues = filterOkHCLPayloads(
-    node.pluginData.map((entry) => entry.value),
+    (node.pluginData || []).map((entry) => entry.value),
     'fill',
     index
   )
@@ -210,7 +210,7 @@ export function clearNodeFillOkHCL(node: SceneNode, index: number): Partial<Scen
 
 export function clearNodeStrokeOkHCL(node: SceneNode, index: number): Partial<SceneNode> {
   const okhclValues = filterOkHCLPayloads(
-    node.pluginData.map((entry) => entry.value),
+    (node.pluginData || []).map((entry) => entry.value),
     'stroke',
     index
   )
@@ -224,7 +224,7 @@ export function clearNodeStrokeOkHCL(node: SceneNode, index: number): Partial<Sc
 }
 
 export function getNodeOkHCLPayloads(node: SceneNode): OkHCLPayload[] {
-  return node.pluginData
+  return (node.pluginData || [])
     .filter((entry) => entry.pluginId === 'open-pencil' && entry.key === OKHCL_PLUGIN_KEY)
     .map((entry) => parseOkHCLPayload(entry.value))
     .filter((payload): payload is OkHCLPayload => payload !== null)

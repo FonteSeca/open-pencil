@@ -311,7 +311,7 @@ export function useTextEdit(canvasRef: Ref<HTMLCanvasElement | null>, store: Edi
   useEventListener(textareaRef, 'compositionend', onCompositionEnd)
   useEventListener(textareaRef, 'keydown', onKeyDown)
 
-  useEventListener(canvasRef, 'mousedown', () => {
+  useEventListener(canvasRef, 'pointerdown', () => {
     if (store.state.editingTextId && textareaRef.value) {
       requestAnimationFrame(() => textareaRef.value?.focus())
     }
